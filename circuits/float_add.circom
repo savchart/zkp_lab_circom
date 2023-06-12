@@ -1,9 +1,5 @@
 pragma circom 2.0.0;
 
-/////////////////////////////////////////////////////////////////////////////////////
-/////////////////////// Templates from the circomlib ////////////////////////////////
-////////////////// Copy-pasted here for easy reference //////////////////////////////
-/////////////////////////////////////////////////////////////////////////////////////
 
 /*
  * Outputs `a` AND `b`
@@ -122,7 +118,6 @@ template IsEqual() {
 
 /*
  * Checks if `in[0]` < `in[1]` and returns the output in `out`.
- * Assumes `n` bit inputs. The behavior is not well-defined if any input is more than `n`-bits long.
  */
 template LessThan(n) {
     assert(n <= 252);
@@ -148,7 +143,17 @@ template CheckBitLength(b) {
     signal input in;
     signal output out;
 
-    // TODO
+    signal bits[b];
+    var sum_of_bits = 0;
+    for (var i = 0; i < b; i++) {
+        bits[i] <-- (in >> i) & 1;
+        bits[i] * (1 - bits[i]) === 0;
+        sum_of_bits += (2 ** i) * bits[i];
+    }
+    component is_equal = IsEqual();
+    is_equal.in[0] <== sum_of_bits;
+    is_equal.in[1] <== in;
+    out <== is_equal.out;
 }
 
 /*
@@ -197,8 +202,18 @@ template RightShift(b, shift) {
     signal input x;
     signal output y;
 
-    // TODO
+    component n2b = Num2Bits(b);
+    n2b.in <== x;
+
+    signal bits_out[b-shift];
+    for (var i = 0; i < b-shift; i++) {
+        bits_out[i] <== n2b.bits[i+shift];
+    }
+    component b2n = Bits2Num(b-shift);
+    b2n.bits <== bits_out;
+    y <== b2n.out;
 }
+
 
 /*
  * Rounds the input floating-point number and checks to ensure that rounding does not make the mantissa unnormalized.
@@ -248,6 +263,7 @@ template RoundAndCheck(k, p, P) {
     m_out <== if_else[1].out;
 }
 
+
 /*
  * Left-shifts `x` by `shift` bits to output `y`.
  * Enforces 0 <= `shift` < `shift_bound`.
@@ -259,8 +275,20 @@ template LeftShift(shift_bound) {
     signal input skip_checks;
     signal output y;
 
-    // TODO
+    component check_shift = LessThan(shift_bound);
+    check_shift.in[0] <== shift;
+    check_shift.in[1] <== shift_bound;
+
+    component if_else = IfThenElse();
+    if_else.cond <== skip_checks;
+    if_else.L <== 1;
+    if_else.R <== check_shift.out;
+    if_else.out === 1;
+
+   y <-- x << shift;
+
 }
+
 
 /*
  * Find the Most-Significant Non-Zero Bit (MSNZB) of `in`, where `in` is assumed to be non-zero value of `b` bits.
@@ -274,7 +302,22 @@ template MSNZB(b) {
     signal input skip_checks;
     signal output one_hot[b];
 
-    // TODO
+    component check_in = IsZero();
+    check_in.in <== in;
+    check_in.out === skip_checks;
+
+    component n2b = Num2Bits(b);
+    n2b.in <== in;
+
+   signal mask[b];
+   mask[b-1] <== 1;
+   for (var i = b-2; i >= 0; i--) {
+        mask[i] <== mask[i+1] * (1 - n2b.bits[i+1]);
+   }
+
+    for (var i = 0; i < b; i++) {
+          one_hot[i] <== mask[i] * n2b.bits[i];
+    }
 }
 
 /*
@@ -292,7 +335,22 @@ template Normalize(k, p, P) {
     signal output m_out;
     assert(P > p);
 
-    // TODO
+
+    // find the MSNZB of m
+    component msnzb = MSNZB(P+1);
+    msnzb.in <== m;
+    msnzb.skip_checks <== skip_checks;
+
+    var ell = 0;
+    var shift = 0;
+    for (var i = 0; i < P+1; i++) {
+        ell += msnzb.one_hot[i] * i;
+        shift += msnzb.one_hot[i] * (1 << (P-i));
+    }
+
+    e_out <== e + ell - p;
+    m_out <== m * shift;
+
 }
 
 /*
@@ -308,5 +366,88 @@ template FloatAdd(k, p) {
     signal output e_out;
     signal output m_out;
 
-    // TODO
+    component check_wf_first = CheckWellFormedness(k, p);
+    check_wf_first.e <== e[0];
+    check_wf_first.m <== m[0];
+    component check_wf_second = CheckWellFormedness(k, p);
+    check_wf_second.e <== e[1];
+    check_wf_second.m <== m[1];
+
+    component lt = LessThan(k + p + 1);
+    for (var i = 0; i < 2; i++) {
+        lt.in[i] <== m[i] + e[i] * (1 << (p+1));
+    }
+
+    component switcher_e = Switcher();
+    component switcher_m = Switcher();
+
+    switcher_e.sel <== lt.out;
+    switcher_e.L <== e[0];
+    switcher_e.R <== e[1];
+    var e_a = switcher_e.outL;
+    var e_b = switcher_e.outR;
+
+    switcher_m.sel <== lt.out;
+    switcher_m.L <== m[0];
+    switcher_m.R <== m[1];
+    var m_a = switcher_m.outL;
+    var m_b = switcher_m.outR;
+
+    signal diff <== e_a - e_b;
+
+    component diff_check = LessThan(k);
+    diff_check.in[0] <== p+1;
+    diff_check.in[1] <== diff;
+
+    component isZero = IsZero();
+    isZero.in <== e_a;
+
+    component or_check = OR();
+    or_check.a <== diff_check.out;
+    or_check.b <== isZero.out;
+
+    component ie_m_a = IfThenElse();
+    ie_m_a.cond <== or_check.out;
+    ie_m_a.L <== 1;
+    ie_m_a.R <== m_a;
+
+    component ie_diff = IfThenElse();
+    ie_diff.cond <== or_check.out;
+    ie_diff.L <== 0;
+    ie_diff.R <== diff;
+
+    component ie_e_b = IfThenElse();
+    ie_e_b.cond <== or_check.out;
+    ie_e_b.L <== 1;
+    ie_e_b.R <== e_b;
+
+    component m_a_shift = LeftShift(p+2);
+    m_a_shift.x <== ie_m_a.out;
+    m_a_shift.shift <== ie_diff.out;
+    m_a_shift.skip_checks <== 0;
+
+
+    component normalize = Normalize(k, p, 2*p+1);
+    normalize.e <== ie_e_b.out;
+    normalize.m <== m_a_shift.y + m_b;
+    normalize.skip_checks <== 0;
+
+
+    component round_and_check = RoundAndCheck(k, p, 2*p+1);
+    round_and_check.e <== normalize.e_out;
+    round_and_check.m <== normalize.m_out;
+
+    component if_else_m = IfThenElse();
+    if_else_m.cond <== or_check.out;
+    if_else_m.L <== m_a;
+    if_else_m.R <== round_and_check.m_out;
+
+    component if_else_e = IfThenElse();
+    if_else_e.cond <== or_check.out;
+    if_else_e.L <== e_a;
+    if_else_e.R <== round_and_check.e_out;
+
+    e_out <== if_else_e.out;
+    m_out <== if_else_m.out;
+
 }
